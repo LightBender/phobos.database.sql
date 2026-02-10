@@ -1,0 +1,7 @@
+name "phobos-database-sql"
+description "The phobos.database.sql library provides standardized access to any SQL data source that provides a compliant ODBC driver."
+authors "Adam Wilson"
+copyright "Copyright © 2026, Adam Wilson"
+license "BSL-1.0"
+
+lflags `-lodbc`
