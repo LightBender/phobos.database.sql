@@ -180,7 +180,8 @@ class SqlConnection : DbConnection
 
     override DbCommand createCommand()
     {
-        return new SqlCommand();
+        //return new SqlCommand();
+        return null; //TODO
     }
 
     override DbTransaction beginTransaction(IsolationLevel level = IsolationLevel.unspecified)
