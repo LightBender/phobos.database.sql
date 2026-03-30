@@ -61,6 +61,9 @@ abstract class DbDataReader
     /// Returns the value of the specified column as a string.
     string getString(int ordinal) { return getValue!string(ordinal); }
 
+    /// Returns the value of the specified column as an array of bytes.
+    byte[] getBytes(int ordinal) { return getValue(ordinal).get!(byte[]); }
+
     /// Gets a value that indicates whether the column contains non-existent or missing values.
     abstract bool isNull(int ordinal);
 
@@ -173,6 +176,11 @@ class SqlDataReader : DbDataReader
         enum SQL_C_SLONG = SQL_C_LONG - 20;
         enum SQL_C_DOUBLE = 8;
         enum SQL_C_BIT = -7;
+        enum SQL_C_BINARY = -2;
+
+        enum SQL_BINARY = -2;
+        enum SQL_VARBINARY = -3;
+        enum SQL_LONGVARBINARY = -4;
 
         SQLSMALLINT dataType;
         auto ret = SQLDescribeCol(_stmt, cast(SQLUSMALLINT)(ordinal + 1), null, 0, null, &dataType, null, null, null);
@@ -228,6 +236,74 @@ class SqlDataReader : DbDataReader
                     return Variant(null);
                 return Variant(lval);
 
+            case SQL_BINARY:
+            case SQL_VARBINARY:
+            case SQL_LONGVARBINARY:
+                // Check the exact length of the binary data first
+                ubyte[1] dummyBin;
+                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_BINARY, dummyBin.ptr, 0, &indPtr);
+                
+                if (ret == 100) return Variant(null); // SQL_NO_DATA
+                if (ret != 0 && ret != 1)
+                {
+                    import std.conv : to;
+                    throw new Exception("Error retrieving length. dataType: " ~ to!string(dataType) ~ " ret: " ~ to!string(ret));
+                }
+                    
+                if (indPtr == SQL_NULL_DATA)
+                    return Variant(null);
+
+                // Allocate a buffer for the required length
+                if (indPtr == 0) return Variant(cast(byte[])[]);
+                if (indPtr > 0 && indPtr != -4) // -4 == SQL_NO_TOTAL
+                {
+                    byte[] binBuf = new byte[indPtr];
+                    SQLLEN finalLen;
+                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_BINARY, binBuf.ptr, cast(SQLLEN)binBuf.length, &finalLen);
+                    
+                    if (ret != 0 && ret != 1)
+                    {
+                        import std.conv : to;
+                        throw new Exception("Error retrieving binary data. ret=" ~ to!string(ret));
+                    }
+                        
+                    return Variant(binBuf.dup);
+                }
+
+                // Fallback to chunking for drivers that return SQL_NO_TOTAL (-4)
+                import std.array : appender;
+                auto appBin = appender!(byte[])();
+                bool notDoneBin = true;
+                while (notDoneBin)
+                {
+                    byte[8192] bufBin;
+                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_BINARY, bufBin.ptr, cast(SQLLEN)bufBin.length, &indPtr);
+                    
+                    if (ret == 100) break; // SQL_NO_DATA
+                    if (ret != 0 && ret != 1)
+                        throw new Exception("Error retrieving data.");
+                        
+                    if (indPtr == SQL_NULL_DATA)
+                        return Variant(null);
+                        
+                    if (ret == 0) // SQL_SUCCESS
+                    {
+                        if (indPtr >= 0 && indPtr <= bufBin.length)
+                            appBin.put(bufBin[0 .. indPtr].dup);
+                        else
+                        {
+                            appBin.put(bufBin.dup);
+                        }
+                        notDoneBin = false;
+                    }
+                    else if (ret == 1) // SQL_SUCCESS_WITH_INFO
+                    {
+                        // SQL_SUCCESS_WITH_INFO means buffer is full
+                        appBin.put(bufBin.dup);
+                    }
+                }
+                return Variant(appBin.data);
+
             default:
                 // Check the exact length of the string data first
                 SQLCHAR[1] dummy;
@@ -244,7 +320,8 @@ class SqlDataReader : DbDataReader
                     return Variant(null);
 
                 // Allocate a buffer for the required length (+1 for null terminator)
-                if (indPtr >= 0 && indPtr != -4) // -4 == SQL_NO_TOTAL
+                if (indPtr == 0) return Variant("");
+                if (indPtr > 0 && indPtr != -4) // -4 == SQL_NO_TOTAL
                 {
                     char[] strBuf = new char[indPtr + 1];
                     SQLLEN finalLen;
@@ -368,7 +445,7 @@ unittest
     scope(exit) conn.close();
 
     // Create table
-    auto createCmd = new SqlCommand(conn, i"CREATE TABLE ##ttable_odbc_reader_test (id INT, name NVARCHAR(50), price FLOAT, code CHAR(1), amount BIGINT, count SMALLINT, flag TINYINT, ratio REAL, is_active BIT)");
+    auto createCmd = new SqlCommand(conn, i"CREATE TABLE ##ttable_odbc_reader_test (id INT, name NVARCHAR(50), price FLOAT, code CHAR(1), amount BIGINT, count SMALLINT, flag TINYINT, ratio REAL, is_active BIT, data VARBINARY(MAX))");
     createCmd.executeNonQuery();
     createCmd.dispose();
 
@@ -380,24 +457,24 @@ unittest
     }
 
     // Insert rows
-    auto insert1 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (1, 'Apple', 1.5, 'A', 10000000000, 10, 1, 1.2, 1)");
+    auto insert1 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active, data) VALUES (1, 'Apple', 1.5, 'A', 10000000000, 10, 1, 1.2, 1, 0x010203)");
     insert1.executeNonQuery();
     insert1.dispose();
 
-    auto insert2 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (2, 'Banana', 2.3, 'B', 20000000000, 20, 2, 2.4, 0)");
+    auto insert2 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active, data) VALUES (2, 'Banana', 2.3, 'B', 20000000000, 20, 2, 2.4, 0, 0xDEADBEEF)");
     insert2.executeNonQuery();
     insert2.dispose();
 
-    auto insert3 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (3, 'Cherry', 3.7, 'C', 30000000000, 30, 3, 3.6, 1)");
+    auto insert3 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active, data) VALUES (3, 'Cherry', 3.7, 'C', 30000000000, 30, 3, 3.6, 1, 0x)");
     insert3.executeNonQuery();
     insert3.dispose();
 
-    auto insert4 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (4, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)");
+    auto insert4 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active, data) VALUES (4, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)");
     insert4.executeNonQuery();
     insert4.dispose();
 
     // Select and read
-    auto selectCmd = new SqlCommand(conn, i"SELECT id, name, price, code, amount, count, flag, ratio, is_active FROM ##ttable_odbc_reader_test ORDER BY id");
+    auto selectCmd = new SqlCommand(conn, i"SELECT id, name, price, code, amount, count, flag, ratio, is_active, data FROM ##ttable_odbc_reader_test ORDER BY id");
     auto reader = selectCmd.executeDataReader();
     scope(exit) reader.close();
 
@@ -423,12 +500,14 @@ unittest
     assert(reader.getByte(6) == 1);
     assert(cast(int)(reader.getFloat(7) * 10) == 12); // avoid exact float matching issues
     assert(reader.getBool(8) == true);
+    assert(reader.getBytes(9) == cast(byte[])[0x01, 0x02, 0x03]);
 
     assert(reader.read() == true);
     
     // Second row: 2, 'Banana', 2.3, etc.
     auto row2Vals = reader.getValues();
-    assert(row2Vals.length == 9);
+    assert(row2Vals.length == 10);
+    assert(row2Vals[9].get!(byte[]) == cast(byte[])[0xDE, 0xAD, 0xBE, 0xEF]);
     assert(row2Vals[0].coerce!int == 2);
     assert(row2Vals[1].coerce!string == "Banana");
     assert(row2Vals[2].coerce!double == 2.3);
@@ -439,6 +518,7 @@ unittest
     // Third row: 3, 'Cherry'
     assert(reader.getChars(3) == "C".dup); 
     assert(reader.getBool(8) == true);
+    assert(reader.getBytes(9).length == 0);
 
     assert(reader.read() == true);
     
@@ -454,6 +534,7 @@ unittest
 
     // Test boolean null
     assert(reader.isNull(8) == true);
+    assert(reader.isNull(9) == true);
     
     assert(reader.read() == false); // No more rows
 
