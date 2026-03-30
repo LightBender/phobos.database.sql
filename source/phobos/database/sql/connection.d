@@ -46,7 +46,7 @@ abstract class DbConnection
     abstract void close();
 
     /// Creates a command object.
-    abstract DbCommand createCommand();
+    abstract DbCommand createCommand(Args...)(SqlConnection connection, Args args);
 
     /// Begins a transaction.
     abstract DbTransaction beginTransaction(IsolationLevel level = IsolationLevel.unspecified);
@@ -178,10 +178,9 @@ class SqlConnection : DbConnection
             close();
     }
 
-    override DbCommand createCommand()
+    override DbCommand createCommand(Args...)(Args args)
     {
-        //return new SqlCommand();
-        return null; //TODO
+        return new SqlCommand(this, args);
     }
 
     override DbTransaction beginTransaction(IsolationLevel level = IsolationLevel.unspecified)
