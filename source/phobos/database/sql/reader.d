@@ -218,19 +218,78 @@ class SqlDataReader : DbDataReader
                     return Variant(null);
                 return Variant(dval);
 
-            default:
-                // Default fallback as string type, similar to basic fetching in ODBC
-                SQLCHAR[1024] buf;
-                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, buf.ptr, cast(SQLLEN)buf.length, &indPtr);
+            case SQL_BIGINT:
+                long lval;
+                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_SBIGINT, &lval, 0, &indPtr);
                 if (ret == 100) return Variant(null);
                 if (ret != 0 && ret != 1)
                     throw new Exception("Error retrieving data.");
                 if (indPtr == SQL_NULL_DATA)
                     return Variant(null);
-                if (indPtr >= 0 && indPtr < buf.length)
-                    return Variant(cast(string)buf[0 .. indPtr].idup);
-                import core.stdc.string : strlen;
-                return Variant(cast(string)buf[0 .. strlen(cast(char*)buf.ptr)].idup);
+                return Variant(lval);
+
+            default:
+                // Check the exact length of the string data first
+                SQLCHAR[1] dummy;
+                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, dummy.ptr, 0, &indPtr);
+                
+                if (ret == 100) return Variant(null); // SQL_NO_DATA
+                if (ret != 0 && ret != 1)
+                {
+                    import std.conv : to;
+                    throw new Exception("Error retrieving length. dataType: " ~ to!string(dataType) ~ " ret: " ~ to!string(ret));
+                }
+                    
+                if (indPtr == SQL_NULL_DATA)
+                    return Variant(null);
+
+                // Allocate a buffer for the required length (+1 for null terminator)
+                if (indPtr >= 0 && indPtr != -4) // -4 == SQL_NO_TOTAL
+                {
+                    char[] strBuf = new char[indPtr + 1];
+                    SQLLEN finalLen;
+                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, strBuf.ptr, cast(SQLLEN)strBuf.length, &finalLen);
+                    
+                    if (ret != 0 && ret != 1)
+                        throw new Exception("Error retrieving string data.");
+                        
+                    return Variant(cast(string)strBuf[0 .. indPtr].idup);
+                }
+
+                // Fallback to chunking for drivers that return SQL_NO_TOTAL (-4)
+                import std.array : appender;
+                auto app = appender!string();
+                bool notDone = true;
+                while (notDone)
+                {
+                    SQLCHAR[8192] buf;
+                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, buf.ptr, cast(SQLLEN)buf.length, &indPtr);
+                    
+                    if (ret == 100) break; // SQL_NO_DATA
+                    if (ret != 0 && ret != 1)
+                        throw new Exception("Error retrieving data.");
+                        
+                    if (indPtr == SQL_NULL_DATA)
+                        return Variant(null);
+                        
+                    if (ret == 0) // SQL_SUCCESS
+                    {
+                        if (indPtr >= 0 && indPtr < buf.length)
+                            app.put(cast(string)buf[0 .. indPtr].idup);
+                        else
+                        {
+                            import core.stdc.string : strlen;
+                            app.put(cast(string)buf[0 .. strlen(cast(char*)buf.ptr)].idup);
+                        }
+                        notDone = false;
+                    }
+                    else if (ret == 1) // SQL_SUCCESS_WITH_INFO
+                    {
+                        // SQL_SUCCESS_WITH_INFO means buffer is full, except the null terminator
+                        app.put(cast(string)buf[0 .. buf.length - 1].idup);
+                    }
+                }
+                return Variant(app.data);
         }
     }
 
