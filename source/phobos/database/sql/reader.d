@@ -58,6 +58,9 @@ abstract class DbDataReader
     /// Returns the value of the specified column as a string.
     string getString(int ordinal) { return getValue!string(ordinal); }
 
+    /// Gets a value that indicates whether the column contains non-existent or missing values.
+    abstract bool isNull(int ordinal);
+
     /// Attempts to convert the database value to specified template type.
     T getValue(T)(int ordinal)
     {
@@ -182,6 +185,7 @@ class SqlDataReader : DbDataReader
             case SQL_TINYINT:
                 int val;
                 ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_SLONG, &val, 0, &indPtr);
+                if (ret == 100) return Variant(null);
                 if (ret != 0 && ret != 1)
                     throw new Exception("Error retrieving data.");
                 if (indPtr == SQL_NULL_DATA)
@@ -193,6 +197,7 @@ class SqlDataReader : DbDataReader
             case SQL_DOUBLE:
                 double dval;
                 ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_DOUBLE, &dval, 0, &indPtr);
+                if (ret == 100) return Variant(null);
                 if (ret != 0 && ret != 1)
                     throw new Exception("Error retrieving data.");
                 if (indPtr == SQL_NULL_DATA)
@@ -203,6 +208,7 @@ class SqlDataReader : DbDataReader
                 // Default fallback as string type, similar to basic fetching in ODBC
                 SQLCHAR[1024] buf;
                 ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, buf.ptr, cast(SQLLEN)buf.length, &indPtr);
+                if (ret == 100) return Variant(null);
                 if (ret != 0 && ret != 1)
                     throw new Exception("Error retrieving data.");
                 if (indPtr == SQL_NULL_DATA)
@@ -232,6 +238,24 @@ class SqlDataReader : DbDataReader
             values[i] = getValue(i);
         }
         return values;
+    }
+
+    override bool isNull(int ordinal)
+    {
+        if (_isClosed)
+            throw new Exception("Invalid attempt to read when reader is closed.");
+
+        SQLLEN indPtr;
+        enum SQL_C_CHAR = 1;
+        SQLCHAR[1] dummy;
+        auto ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, dummy.ptr, 0, &indPtr);
+        
+        if (ret != 0 && ret != 1)
+        {
+            throw new Exception("Error retrieving data for null check.");
+        }
+        
+        return indPtr == SQL_NULL_DATA;
     }
 
     override void close()
@@ -295,6 +319,10 @@ unittest
     insert3.executeNonQuery();
     insert3.dispose();
 
+    auto insert4 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio) VALUES (4, NULL, NULL, NULL, NULL, NULL, NULL, NULL)");
+    insert4.executeNonQuery();
+    insert4.dispose();
+
     // Select and read
     auto selectCmd = new SqlCommand(conn, i"SELECT id, name, price, code, amount, count, flag, ratio FROM ##ttable_odbc_reader_test ORDER BY id");
     auto reader = selectCmd.executeDataReader();
@@ -336,6 +364,18 @@ unittest
     // Third row: 3, 'Cherry'
     assert(reader.getChars(3) == "C".dup); 
 
+    assert(reader.read() == true);
+    
+    // Fourth row: 4, NULL, NULL, etc.
+    assert(reader.getInt(0) == 4);
+    assert(reader.isNull(1) == true);
+    assert(reader.isNull(2) == true);
+    
+    // Test that isNull doesn't consume the value if we subsequently read
+    assert(reader.isNull(3) == true);
+    auto nullVariant = reader.getValue(3);
+    assert(nullVariant.type == typeid(typeof(null)));
+    
     assert(reader.read() == false); // No more rows
 
     selectCmd.dispose();
