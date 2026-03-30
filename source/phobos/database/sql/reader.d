@@ -28,6 +28,9 @@ abstract class DbDataReader
     /// Returns an array of Variant for each value in the row.
     abstract Variant[] getValues();
 
+    /// Returns the value of the specified column as a boolean.
+    bool getBool(int ordinal) { return getValue!bool(ordinal); }
+
     /// Returns the value of the specified column as a byte.
     byte getByte(int ordinal) { return getValue!byte(ordinal); }
 
@@ -169,6 +172,7 @@ class SqlDataReader : DbDataReader
         enum SQL_C_LONG = 4;
         enum SQL_C_SLONG = SQL_C_LONG - 20;
         enum SQL_C_DOUBLE = 8;
+        enum SQL_C_BIT = -7;
 
         SQLSMALLINT dataType;
         auto ret = SQLDescribeCol(_stmt, cast(SQLUSMALLINT)(ordinal + 1), null, 0, null, &dataType, null, null, null);
@@ -180,6 +184,16 @@ class SqlDataReader : DbDataReader
         SQLLEN indPtr;
         switch (dataType)
         {
+            case SQL_BIT:
+                ubyte bval;
+                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_BIT, &bval, 0, &indPtr);
+                if (ret == 100) return Variant(null);
+                if (ret != 0 && ret != 1)
+                    throw new Exception("Error retrieving data.");
+                if (indPtr == SQL_NULL_DATA)
+                    return Variant(null);
+                return Variant(bval != 0);
+
             case SQL_INTEGER:
             case SQL_SMALLINT:
             case SQL_TINYINT:
@@ -295,7 +309,7 @@ unittest
     scope(exit) conn.close();
 
     // Create table
-    auto createCmd = new SqlCommand(conn, i"CREATE TABLE ##ttable_odbc_reader_test (id INT, name NVARCHAR(50), price FLOAT, code CHAR(1), amount BIGINT, count SMALLINT, flag TINYINT, ratio REAL)");
+    auto createCmd = new SqlCommand(conn, i"CREATE TABLE ##ttable_odbc_reader_test (id INT, name NVARCHAR(50), price FLOAT, code CHAR(1), amount BIGINT, count SMALLINT, flag TINYINT, ratio REAL, is_active BIT)");
     createCmd.executeNonQuery();
     createCmd.dispose();
 
@@ -307,24 +321,24 @@ unittest
     }
 
     // Insert rows
-    auto insert1 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio) VALUES (1, 'Apple', 1.5, 'A', 10000000000, 10, 1, 1.2)");
+    auto insert1 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (1, 'Apple', 1.5, 'A', 10000000000, 10, 1, 1.2, 1)");
     insert1.executeNonQuery();
     insert1.dispose();
 
-    auto insert2 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio) VALUES (2, 'Banana', 2.3, 'B', 20000000000, 20, 2, 2.4)");
+    auto insert2 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (2, 'Banana', 2.3, 'B', 20000000000, 20, 2, 2.4, 0)");
     insert2.executeNonQuery();
     insert2.dispose();
 
-    auto insert3 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio) VALUES (3, 'Cherry', 3.7, 'C', 30000000000, 30, 3, 3.6)");
+    auto insert3 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (3, 'Cherry', 3.7, 'C', 30000000000, 30, 3, 3.6, 1)");
     insert3.executeNonQuery();
     insert3.dispose();
 
-    auto insert4 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio) VALUES (4, NULL, NULL, NULL, NULL, NULL, NULL, NULL)");
+    auto insert4 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_reader_test (id, name, price, code, amount, count, flag, ratio, is_active) VALUES (4, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)");
     insert4.executeNonQuery();
     insert4.dispose();
 
     // Select and read
-    auto selectCmd = new SqlCommand(conn, i"SELECT id, name, price, code, amount, count, flag, ratio FROM ##ttable_odbc_reader_test ORDER BY id");
+    auto selectCmd = new SqlCommand(conn, i"SELECT id, name, price, code, amount, count, flag, ratio, is_active FROM ##ttable_odbc_reader_test ORDER BY id");
     auto reader = selectCmd.executeDataReader();
     scope(exit) reader.close();
 
@@ -340,7 +354,7 @@ unittest
     // Advance to rows
     assert(reader.read() == true);
     
-    // First row: 1, 'Apple', 1.5, 'A', 10000000000, 10, 1, 1.2
+    // First row: 1, 'Apple', 1.5, 'A', 10000000000, 10, 1, 1.2, 1
     assert(reader.getInt(0) == 1);
     assert(reader.getString(1) == "Apple");
     assert(reader.getDouble(2) == 1.5);
@@ -349,20 +363,23 @@ unittest
     assert(reader.getShort(5) == 10);
     assert(reader.getByte(6) == 1);
     assert(cast(int)(reader.getFloat(7) * 10) == 12); // avoid exact float matching issues
+    assert(reader.getBool(8) == true);
 
     assert(reader.read() == true);
     
     // Second row: 2, 'Banana', 2.3, etc.
     auto row2Vals = reader.getValues();
-    assert(row2Vals.length == 8);
+    assert(row2Vals.length == 9);
     assert(row2Vals[0].coerce!int == 2);
     assert(row2Vals[1].coerce!string == "Banana");
     assert(row2Vals[2].coerce!double == 2.3);
+    assert(row2Vals[8].coerce!bool == false);
 
     assert(reader.read() == true);
 
     // Third row: 3, 'Cherry'
     assert(reader.getChars(3) == "C".dup); 
+    assert(reader.getBool(8) == true);
 
     assert(reader.read() == true);
     
@@ -375,10 +392,11 @@ unittest
     assert(reader.isNull(3) == true);
     auto nullVariant = reader.getValue(3);
     assert(nullVariant.type == typeid(typeof(null)));
+
+    // Test boolean null
+    assert(reader.isNull(8) == true);
     
     assert(reader.read() == false); // No more rows
 
     selectCmd.dispose();
 }
-
-
