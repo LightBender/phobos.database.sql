@@ -2,7 +2,8 @@ module phobos.database.sql.transaction;
 
 import phobos.database.sql.connection;
 import phobos.database.sql.utility;
-import etc.c.odbc.odbc64;
+import odbc;
+import etc.c.odbc;
 import std.exception;
 
 enum IsolationLevel
@@ -40,25 +41,24 @@ class SqlTransaction : DbTransaction
         _level = level;
 
         // Disable autocommit
-        auto ret = SQLSetConnectAttr(_connection.dbc(), 90, cast(SQLPOINTER)0, 0);
-        checkError(cast(SQLSMALLINT)2, _connection.dbc(), ret, "SQLSetConnectAttr AUTOCOMMIT OFF");
+        enforceOk(setConnectAttr(_connection.dbc(), SQL_ATTR_AUTOCOMMIT,
+                cast(SQLUINTEGER)SQL_AUTOCOMMIT_OFF), "SQLSetConnectAttr AUTOCOMMIT OFF");
 
         // Set isolation level
-        uint iso = odbcIsolationLevel(_level);
-        auto ret2 = SQLSetConnectAttr(_connection.dbc(), 88, cast(SQLPOINTER)iso, 0);
-        checkError(cast(SQLSMALLINT)2, _connection.dbc(), ret2, "SQLSetConnectAttr TXN_ISOLATION");
+        enforceOk(setConnectAttr(_connection.dbc(), SQL_ATTR_TXN_ISOLATION,
+                odbcIsolationLevel(_level)), "SQLSetConnectAttr TXN_ISOLATION");
     }
 
-    private uint odbcIsolationLevel(IsolationLevel l)
+    private SQLUINTEGER odbcIsolationLevel(IsolationLevel l)
     {
         final switch (l)
         {
             case IsolationLevel.unspecified: return 0;
-            case IsolationLevel.readUncommitted: return 1;
-            case IsolationLevel.readCommitted: return 2;
-            case IsolationLevel.repeatableRead: return 3;
-            case IsolationLevel.serializable: return 4;
-            case IsolationLevel.chaos, IsolationLevel.snapshot: return 4;
+            case IsolationLevel.readUncommitted: return SQL_TXN_READ_UNCOMMITTED;
+            case IsolationLevel.readCommitted: return SQL_TXN_READ_COMMITTED;
+            case IsolationLevel.repeatableRead: return SQL_TXN_REPEATABLE_READ;
+            case IsolationLevel.serializable: return SQL_TXN_SERIALIZABLE;
+            case IsolationLevel.chaos, IsolationLevel.snapshot: return SQL_TXN_SERIALIZABLE;
         }
     }
 
@@ -70,12 +70,11 @@ class SqlTransaction : DbTransaction
     {
         if (_committed) throw new Exception("Transaction already committed or rolled back.");
 
-        auto ret = SQLEndTran(cast(SQLSMALLINT)2, _connection.dbc(), cast(SQLSMALLINT)1);
-        checkError(cast(SQLSMALLINT)2, _connection.dbc(), ret, "SQLEndTran COMMIT");
+        enforceOk(endTran(SQL_HANDLE_DBC, _connection.dbc(), SQL_COMMIT), "SQLEndTran COMMIT");
 
         // Re-enable autocommit
-        auto ret2 = SQLSetConnectAttr(_connection.dbc(), 90, cast(SQLPOINTER)1, 0);
-        checkError(cast(SQLSMALLINT)2, _connection.dbc(), ret2, "SQLSetConnectAttr AUTOCOMMIT ON");
+        enforceOk(setConnectAttr(_connection.dbc(), SQL_ATTR_AUTOCOMMIT,
+                cast(SQLUINTEGER)SQL_AUTOCOMMIT_ON), "SQLSetConnectAttr AUTOCOMMIT ON");
 
         _committed = true;
     }
@@ -84,12 +83,11 @@ class SqlTransaction : DbTransaction
     {
         if (_committed) throw new Exception("Transaction already committed or rolled back.");
 
-        auto ret = SQLEndTran(cast(SQLSMALLINT)2, _connection.dbc(), cast(SQLSMALLINT)0);
-        checkError(cast(SQLSMALLINT)2, _connection.dbc(), ret, "SQLEndTran ROLLBACK");
+        enforceOk(endTran(SQL_HANDLE_DBC, _connection.dbc(), SQL_ROLLBACK), "SQLEndTran ROLLBACK");
 
         // Re-enable autocommit
-        auto ret2 = SQLSetConnectAttr(_connection.dbc(), 90, cast(SQLPOINTER)1, 0);
-        checkError(cast(SQLSMALLINT)2, _connection.dbc(), ret2, "SQLSetConnectAttr AUTOCOMMIT ON");
+        enforceOk(setConnectAttr(_connection.dbc(), SQL_ATTR_AUTOCOMMIT,
+                cast(SQLUINTEGER)SQL_AUTOCOMMIT_ON), "SQLSetConnectAttr AUTOCOMMIT ON");
 
         _committed = true;
     }

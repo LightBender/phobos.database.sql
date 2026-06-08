@@ -1,7 +1,9 @@
 module phobos.database.sql.reader;
 
 import phobos.database.sql.command;
-import etc.c.odbc.odbc64;
+import phobos.database.sql.utility;
+import odbc;
+import etc.c.odbc;
 import std.datetime;
 import std.exception;
 import std.variant;
@@ -96,16 +98,10 @@ class SqlDataReader : DbDataReader
         if (_isClosed)
             throw new Exception("Invalid attempt to read when reader is closed.");
 
-        auto ret = SQLFetch(_stmt);
-        if (ret == 100) // SQL_NO_DATA
+        auto res = fetch(_stmt);
+        if (res.code == SQL_NO_DATA)
             return false;
-        
-        // SQL_SUCCESS = 0, SQL_SUCCESS_WITH_INFO = 1
-        if (ret != 0 && ret != 1)
-        {
-            throw new Exception("Error fetching data.");
-        }
-
+        enforceOk(res, "SQLFetch");
         return true;
     }
 
@@ -114,15 +110,10 @@ class SqlDataReader : DbDataReader
         if (_isClosed)
             throw new Exception("Invalid attempt to call nextResult when reader is closed.");
 
-        auto ret = SQLMoreResults(_stmt);
-        if (ret == 100) // SQL_NO_DATA
+        auto res = moreResults(_stmt);
+        if (res.code == SQL_NO_DATA)
             return false;
-
-        if (ret != 0 && ret != 1)
-        {
-            throw new Exception("Error advancing to next result.");
-        }
-
+        enforceOk(res, "SQLMoreResults");
         return true;
     }
 
@@ -131,15 +122,7 @@ class SqlDataReader : DbDataReader
         if (_isClosed)
             throw new Exception("Invalid attempt to read when reader is closed.");
 
-        SQLCHAR[256] colName;
-        SQLSMALLINT nameLen;
-        auto ret = SQLDescribeCol(_stmt, cast(SQLUSMALLINT)(ordinal + 1), colName.ptr, cast(SQLSMALLINT)colName.length, &nameLen, null, null, null, null);
-        if (ret != 0 && ret != 1)
-        {
-            throw new Exception("Failed to get column name.");
-        }
-
-        return cast(string)colName[0 .. nameLen].idup;
+        return unwrap(describeColumn(_stmt, cast(SQLUSMALLINT)(ordinal + 1)), "SQLDescribeCol").name;
     }
 
     override int getOrdinal(string name)
@@ -147,12 +130,7 @@ class SqlDataReader : DbDataReader
         if (_isClosed)
             throw new Exception("Invalid attempt to read when reader is closed.");
 
-        SQLSMALLINT colCount;
-        auto ret = SQLNumResultCols(_stmt, &colCount);
-        if (ret != 0 && ret != 1)
-        {
-            throw new Exception("Failed to get column count.");
-        }
+        SQLSMALLINT colCount = unwrap(numResultCols(_stmt), "SQLNumResultCols");
 
         for (int i = 0; i < colCount; i++)
         {
@@ -170,35 +148,20 @@ class SqlDataReader : DbDataReader
         if (_isClosed)
             throw new Exception("Invalid attempt to read when reader is closed.");
 
-        // ODBC C Types
-        enum SQL_C_CHAR = 1;
-        enum SQL_C_LONG = 4;
-        enum SQL_C_SLONG = SQL_C_LONG - 20;
-        enum SQL_C_DOUBLE = 8;
-        enum SQL_C_BIT = -7;
-        enum SQL_C_BINARY = -2;
+        immutable col = cast(SQLUSMALLINT)(ordinal + 1);
 
-        enum SQL_BINARY = -2;
-        enum SQL_VARBINARY = -3;
-        enum SQL_LONGVARBINARY = -4;
+        SQLSMALLINT dataType = unwrap(describeColumn(_stmt, col), "SQLDescribeCol").dataType;
 
-        SQLSMALLINT dataType;
-        auto ret = SQLDescribeCol(_stmt, cast(SQLUSMALLINT)(ordinal + 1), null, 0, null, &dataType, null, null, null);
-        if (ret != 0 && ret != 1)
-        {
-            throw new Exception("Failed to get column type.");
-        }
-
+        Result!SQLLEN res;
         SQLLEN indPtr;
         switch (dataType)
         {
             case SQL_BIT:
                 ubyte bval;
-                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_BIT, &bval, 0, &indPtr);
-                if (ret == 100) return Variant(null);
-                if (ret != 0 && ret != 1)
-                    throw new Exception("Error retrieving data.");
-                if (indPtr == SQL_NULL_DATA)
+                res = getData(_stmt, col, SQL_C_BIT, (cast(void*)&bval)[0 .. bval.sizeof]);
+                if (res.code == SQL_NO_DATA) return Variant(null);
+                enforceOk(res, "SQLGetData");
+                if (res.value == SQL_NULL_DATA)
                     return Variant(null);
                 return Variant(bval != 0);
 
@@ -206,33 +169,30 @@ class SqlDataReader : DbDataReader
             case SQL_SMALLINT:
             case SQL_TINYINT:
                 int val;
-                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_SLONG, &val, 0, &indPtr);
-                if (ret == 100) return Variant(null);
-                if (ret != 0 && ret != 1)
-                    throw new Exception("Error retrieving data.");
-                if (indPtr == SQL_NULL_DATA)
+                res = getData(_stmt, col, SQL_C_SLONG, (cast(void*)&val)[0 .. val.sizeof]);
+                if (res.code == SQL_NO_DATA) return Variant(null);
+                enforceOk(res, "SQLGetData");
+                if (res.value == SQL_NULL_DATA)
                     return Variant(null);
                 return Variant(val);
-                
+
             case SQL_FLOAT:
             case SQL_REAL:
             case SQL_DOUBLE:
                 double dval;
-                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_DOUBLE, &dval, 0, &indPtr);
-                if (ret == 100) return Variant(null);
-                if (ret != 0 && ret != 1)
-                    throw new Exception("Error retrieving data.");
-                if (indPtr == SQL_NULL_DATA)
+                res = getData(_stmt, col, SQL_C_DOUBLE, (cast(void*)&dval)[0 .. dval.sizeof]);
+                if (res.code == SQL_NO_DATA) return Variant(null);
+                enforceOk(res, "SQLGetData");
+                if (res.value == SQL_NULL_DATA)
                     return Variant(null);
                 return Variant(dval);
 
             case SQL_BIGINT:
                 long lval;
-                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_SBIGINT, &lval, 0, &indPtr);
-                if (ret == 100) return Variant(null);
-                if (ret != 0 && ret != 1)
-                    throw new Exception("Error retrieving data.");
-                if (indPtr == SQL_NULL_DATA)
+                res = getData(_stmt, col, SQL_C_SBIGINT, (cast(void*)&lval)[0 .. lval.sizeof]);
+                if (res.code == SQL_NO_DATA) return Variant(null);
+                enforceOk(res, "SQLGetData");
+                if (res.value == SQL_NULL_DATA)
                     return Variant(null);
                 return Variant(lval);
 
@@ -241,52 +201,41 @@ class SqlDataReader : DbDataReader
             case SQL_LONGVARBINARY:
                 // Check the exact length of the binary data first
                 ubyte[1] dummyBin;
-                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_BINARY, dummyBin.ptr, 0, &indPtr);
-                
-                if (ret == 100) return Variant(null); // SQL_NO_DATA
-                if (ret != 0 && ret != 1)
-                {
-                    import std.conv : to;
-                    throw new Exception("Error retrieving length. dataType: " ~ to!string(dataType) ~ " ret: " ~ to!string(ret));
-                }
-                    
+                res = getData(_stmt, col, SQL_C_BINARY, (cast(void*)dummyBin.ptr)[0 .. 0]);
+
+                if (res.code == SQL_NO_DATA) return Variant(null);
+                enforceOk(res, "SQLGetData");
+                indPtr = res.value;
+
                 if (indPtr == SQL_NULL_DATA)
                     return Variant(null);
 
                 // Allocate a buffer for the required length
                 if (indPtr == 0) return Variant(cast(byte[])[]);
-                if (indPtr > 0 && indPtr != -4) // -4 == SQL_NO_TOTAL
+                if (indPtr > 0 && indPtr != SQL_NO_TOTAL)
                 {
                     byte[] binBuf = new byte[indPtr];
-                    SQLLEN finalLen;
-                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_BINARY, binBuf.ptr, cast(SQLLEN)binBuf.length, &finalLen);
-                    
-                    if (ret != 0 && ret != 1)
-                    {
-                        import std.conv : to;
-                        throw new Exception("Error retrieving binary data. ret=" ~ to!string(ret));
-                    }
-                        
+                    enforceOk(getData(_stmt, col, SQL_C_BINARY, cast(void[])binBuf), "SQLGetData");
                     return Variant(binBuf.dup);
                 }
 
-                // Fallback to chunking for drivers that return SQL_NO_TOTAL (-4)
+                // Fallback to chunking for drivers that return SQL_NO_TOTAL
                 import std.array : appender;
                 auto appBin = appender!(byte[])();
                 bool notDoneBin = true;
                 while (notDoneBin)
                 {
                     byte[8192] bufBin;
-                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), cast(SQLSMALLINT)SQL_C_BINARY, bufBin.ptr, cast(SQLLEN)bufBin.length, &indPtr);
-                    
-                    if (ret == 100) break; // SQL_NO_DATA
-                    if (ret != 0 && ret != 1)
-                        throw new Exception("Error retrieving data.");
-                        
+                    res = getData(_stmt, col, SQL_C_BINARY, cast(void[])bufBin[]);
+
+                    if (res.code == SQL_NO_DATA) break;
+                    enforceOk(res, "SQLGetData");
+                    indPtr = res.value;
+
                     if (indPtr == SQL_NULL_DATA)
                         return Variant(null);
-                        
-                    if (ret == 0) // SQL_SUCCESS
+
+                    if (res.code == SQL_SUCCESS)
                     {
                         if (indPtr >= 0 && indPtr <= bufBin.length)
                             appBin.put(bufBin[0 .. indPtr].dup);
@@ -296,7 +245,7 @@ class SqlDataReader : DbDataReader
                         }
                         notDoneBin = false;
                     }
-                    else if (ret == 1) // SQL_SUCCESS_WITH_INFO
+                    else if (res.code == SQL_SUCCESS_WITH_INFO)
                     {
                         // SQL_SUCCESS_WITH_INFO means buffer is full
                         appBin.put(bufBin.dup);
@@ -307,49 +256,41 @@ class SqlDataReader : DbDataReader
             default:
                 // Check the exact length of the string data first
                 SQLCHAR[1] dummy;
-                ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, dummy.ptr, 0, &indPtr);
-                
-                if (ret == 100) return Variant(null); // SQL_NO_DATA
-                if (ret != 0 && ret != 1)
-                {
-                    import std.conv : to;
-                    throw new Exception("Error retrieving length. dataType: " ~ to!string(dataType) ~ " ret: " ~ to!string(ret));
-                }
-                    
+                res = getData(_stmt, col, SQL_C_CHAR, (cast(void*)dummy.ptr)[0 .. 0]);
+
+                if (res.code == SQL_NO_DATA) return Variant(null);
+                enforceOk(res, "SQLGetData");
+                indPtr = res.value;
+
                 if (indPtr == SQL_NULL_DATA)
                     return Variant(null);
 
                 // Allocate a buffer for the required length (+1 for null terminator)
                 if (indPtr == 0) return Variant("");
-                if (indPtr > 0 && indPtr != -4) // -4 == SQL_NO_TOTAL
+                if (indPtr > 0 && indPtr != SQL_NO_TOTAL)
                 {
                     char[] strBuf = new char[indPtr + 1];
-                    SQLLEN finalLen;
-                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, strBuf.ptr, cast(SQLLEN)strBuf.length, &finalLen);
-                    
-                    if (ret != 0 && ret != 1)
-                        throw new Exception("Error retrieving string data.");
-                        
+                    enforceOk(getData(_stmt, col, SQL_C_CHAR, cast(void[])strBuf), "SQLGetData");
                     return Variant(cast(string)strBuf[0 .. indPtr].idup);
                 }
 
-                // Fallback to chunking for drivers that return SQL_NO_TOTAL (-4)
+                // Fallback to chunking for drivers that return SQL_NO_TOTAL
                 import std.array : appender;
                 auto app = appender!string();
                 bool notDone = true;
                 while (notDone)
                 {
                     SQLCHAR[8192] buf;
-                    ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, buf.ptr, cast(SQLLEN)buf.length, &indPtr);
-                    
-                    if (ret == 100) break; // SQL_NO_DATA
-                    if (ret != 0 && ret != 1)
-                        throw new Exception("Error retrieving data.");
-                        
+                    res = getData(_stmt, col, SQL_C_CHAR, cast(void[])buf[]);
+
+                    if (res.code == SQL_NO_DATA) break;
+                    enforceOk(res, "SQLGetData");
+                    indPtr = res.value;
+
                     if (indPtr == SQL_NULL_DATA)
                         return Variant(null);
-                        
-                    if (ret == 0) // SQL_SUCCESS
+
+                    if (res.code == SQL_SUCCESS)
                     {
                         if (indPtr >= 0 && indPtr < buf.length)
                             app.put(cast(string)buf[0 .. indPtr].idup);
@@ -360,7 +301,7 @@ class SqlDataReader : DbDataReader
                         }
                         notDone = false;
                     }
-                    else if (ret == 1) // SQL_SUCCESS_WITH_INFO
+                    else if (res.code == SQL_SUCCESS_WITH_INFO)
                     {
                         // SQL_SUCCESS_WITH_INFO means buffer is full, except the null terminator
                         app.put(cast(string)buf[0 .. buf.length - 1].idup);
@@ -375,12 +316,7 @@ class SqlDataReader : DbDataReader
         if (_isClosed)
             throw new Exception("Invalid attempt to read when reader is closed.");
 
-        SQLSMALLINT colCount;
-        auto ret = SQLNumResultCols(_stmt, &colCount);
-        if (ret != 0 && ret != 1)
-        {
-            throw new Exception("Failed to get column count.");
-        }
+        SQLSMALLINT colCount = unwrap(numResultCols(_stmt), "SQLNumResultCols");
 
         Variant[] values = new Variant[colCount];
         for (int i = 0; i < colCount; i++)
@@ -395,17 +331,11 @@ class SqlDataReader : DbDataReader
         if (_isClosed)
             throw new Exception("Invalid attempt to read when reader is closed.");
 
-        SQLLEN indPtr;
-        enum SQL_C_CHAR = 1;
         SQLCHAR[1] dummy;
-        auto ret = SQLGetData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR, dummy.ptr, 0, &indPtr);
-        
-        if (ret != 0 && ret != 1)
-        {
-            throw new Exception("Error retrieving data for null check.");
-        }
-        
-        return indPtr == SQL_NULL_DATA;
+        auto res = getData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR,
+                (cast(void*)dummy.ptr)[0 .. 0]);
+        enforceOk(res, "SQLGetData null check");
+        return res.value == SQL_NULL_DATA;
     }
 
     override void close()
@@ -414,7 +344,7 @@ class SqlDataReader : DbDataReader
         {
             if (_stmt !is null)
             {
-                SQLCloseCursor(_stmt);
+                closeCursor(_stmt);
             }
             _isClosed = true;
         }

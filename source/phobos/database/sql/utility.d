@@ -1,9 +1,7 @@
 module phobos.database.sql.utility;
 
-import etc.c.odbc.odbc64;
-import std.exception;
-import std.format;
-import std.string;
+import odbc;
+import std.array : empty;
 
 class ODBCException : Exception {
     this(string msg, string file = __FILE__, size_t line = __LINE__) {
@@ -11,23 +9,22 @@ class ODBCException : Exception {
     }
 }
 
-void checkError(SQLSMALLINT handleType, SQLHANDLE handle,
-                SQLRETURN retcode, string funcName = __FUNCTION__) {
-    if (retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO) {
-        return;
-    }
+/// Throws an `ODBCException` built from `res` when the operation failed.
+void enforceOk(T)(Result!T res, string context,
+                  string file = __FILE__, size_t line = __LINE__) {
+    if (res.isErr)
+        throw new ODBCException(buildMessage(context, res.message), file, line);
+}
 
-    enum MAX_MSG = 256;
-    SQLCHAR[6] sqlState;
-    SQLCHAR[MAX_MSG] messageText;
-    SQLSMALLINT textLength;
-    SQLSMALLINT recNum = 1;
+/// Returns the value of a successful result, or throws an `ODBCException`
+/// describing the failure.
+T unwrap(T)(Result!T res, string context,
+            string file = __FILE__, size_t line = __LINE__) {
+    if (res.isErr)
+        throw new ODBCException(buildMessage(context, res.message), file, line);
+    return res.value;
+}
 
-    SQLRETURN diagRet = SQLGetDiagRec(handleType, handle, recNum,
-                                      sqlState.ptr, null, messageText.ptr,
-                                      cast(SQLSMALLINT)MAX_MSG, &textLength);
-    string stateStr = cast(string)(sqlState[0 .. 5]);
-    string msgStr = cast(string)(messageText[0 .. (textLength < MAX_MSG ? textLength : MAX_MSG)]);
-
-    throw new ODBCException(format!"ODBC %s error (diag: %s): %s"(funcName, stateStr, msgStr));
+private string buildMessage(string context, string detail) {
+    return detail.empty ? context : context ~ ": " ~ detail;
 }

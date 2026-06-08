@@ -4,7 +4,8 @@ import phobos.database.sql.connection;
 import phobos.database.sql.transaction;
 import phobos.database.sql.utility;
 import phobos.database.sql.reader;
-import etc.c.odbc.odbc64;
+import odbc;
+import etc.c.odbc;
 import core.interpolation;
 import std.string;
 import std.traits;
@@ -112,18 +113,16 @@ class SqlCommand : DbCommand
     {
         if (_stmt !is null)
         {
-            SQLFreeHandle(cast(SQLSMALLINT)3, _stmt);
+            freeHandle(SQL_HANDLE_STMT, _stmt);
             _stmt = null;
         }
 
         if (_connection is null || _connection.state != ConnectionState.open)
             throw new ODBCException("Connection must be open to prepare a command.");
 
-        auto ret = SQLAllocHandle(cast(SQLSMALLINT)3, _connection.dbc(), &_stmt);
-        checkError(cast(SQLSMALLINT)2, _connection.dbc(), ret, "SQLAllocHandle STMT");
+        _stmt = unwrap(allocStatement(_connection.dbc()), "SQLAllocHandle STMT");
 
-        auto ret2 = SQLPrepare(_stmt, cast(SQLCHAR*)_commandText.ptr, cast(SQLINTEGER)_commandText.length);
-        checkError(cast(SQLSMALLINT)3, _stmt, ret2, "SQLPrepare");
+        enforceOk(odbc.api.prepare(_stmt, _commandText), "SQLPrepare");
     }
 
     private void bindParameter(T)(SQLUSMALLINT ipar, ref T val)
@@ -131,43 +130,43 @@ class SqlCommand : DbCommand
         SQLSMALLINT cType;
         SQLSMALLINT sqlType;
         SQLULEN columnSize;
-        SQLPOINTER dataPtr;
+        void[] buffer;
 
         size_t idx = ipar - 1;
 
         static if (is(T == int))
         {
-            cType = cast(SQLSMALLINT)-16; // SQL_C_SLONG / SQL_C_LONG
-            sqlType = cast(SQLSMALLINT)4;   // SQL_INTEGER
+            cType = SQL_C_SLONG;
+            sqlType = SQL_INTEGER;
             columnSize = 0;
-            
+
             int* pVal = new int;
             *pVal = val;
             _paramValues[idx] = pVal;
-            dataPtr = pVal;
-            
+            buffer = (cast(void*)pVal)[0 .. int.sizeof];
+
             _paramIndicators[idx] = 0;
         }
         else static if (is(T == string))
         {
-            cType = cast(SQLSMALLINT)1;    // SQL_C_CHAR
-            sqlType = cast(SQLSMALLINT)12;  // SQL_VARCHAR
+            cType = SQL_C_CHAR;
+            sqlType = SQL_VARCHAR;
             columnSize = val.length;
-            dataPtr = cast(SQLPOINTER)val.ptr;
             _paramValues[idx] = cast(void*)val.ptr;
+            buffer = cast(void[])val;
             _paramIndicators[idx] = val.length;
         }
         else static if (is(T == double))
         {
-            cType = cast(SQLSMALLINT)8;    // SQL_C_DOUBLE
-            sqlType = cast(SQLSMALLINT)8;    // SQL_DOUBLE
+            cType = SQL_C_DOUBLE;
+            sqlType = SQL_DOUBLE;
             columnSize = 0;
-            
+
             double* pVal = new double;
             *pVal = val;
             _paramValues[idx] = pVal;
-            dataPtr = pVal;
-            
+            buffer = (cast(void*)pVal)[0 .. double.sizeof];
+
             _paramIndicators[idx] = 0;
         }
         else
@@ -177,46 +176,36 @@ class SqlCommand : DbCommand
 
         // We need to keep the values alive during execution if they are passed by ref from IES.
         // For strings, val.ptr should be fine if it's a GC-managed string.
-        
-        auto ret = SQLBindParameter(_stmt, ipar, 1, cType, sqlType, columnSize, 0, dataPtr, val.sizeof, &_paramIndicators[idx]);
-        checkError(cast(SQLSMALLINT)3, _stmt, ret, "SQLBindParameter");
+
+        enforceOk(odbc.api.bindParameter(_stmt, ipar, SQL_PARAM_INPUT, cType, sqlType,
+                columnSize, 0, buffer, &_paramIndicators[idx]), "SQLBindParameter");
     }
 
     override int executeNonQuery()
     {
         if (_stmt is null) prepare();
 
-        auto ret = SQLExecute(_stmt);
-        checkError(cast(SQLSMALLINT)3, _stmt, ret, "SQLExecute");
+        enforceOk(execute(_stmt), "SQLExecute");
 
-        SQLLEN rowCount;
-        auto ret2 = SQLRowCount(_stmt, &rowCount);
-        checkError(cast(SQLSMALLINT)3, _stmt, ret2, "SQLRowCount");
-
-        return cast(int)rowCount;
+        return cast(int)unwrap(rowCount(_stmt), "SQLRowCount");
     }
 
     override Object executeScalar()
     {
         if (_stmt is null) prepare();
 
-        auto ret = SQLExecute(_stmt);
-        checkError(cast(SQLSMALLINT)3, _stmt, ret, "SQLExecute");
+        enforceOk(execute(_stmt), "SQLExecute");
 
-        auto ret2 = SQLFetch(_stmt);
-        if (ret2 == 100) // SQL_NO_DATA
+        auto fetchRes = fetch(_stmt);
+        if (fetchRes.code == SQL_NO_DATA)
             return null;
-        checkError(cast(SQLSMALLINT)3, _stmt, ret2, "SQLFetch");
+        enforceOk(fetchRes, "SQLFetch");
 
         // For simplicity, let's assume we want the first column as a string or int
-        // We'd need SQLGetData here.
-        
         SQLCHAR[256] buf;
-        SQLLEN indicator;
-        auto ret3 = SQLGetData(_stmt, 1, cast(SQLSMALLINT)1, buf.ptr, 256, &indicator);
-        checkError(cast(SQLSMALLINT)3, _stmt, ret3, "SQLGetData");
+        auto indicator = unwrap(getData(_stmt, 1, SQL_C_CHAR, cast(void[])buf[]), "SQLGetData");
 
-        if (indicator == -1) // SQL_NULL_DATA
+        if (indicator == SQL_NULL_DATA)
             return null;
 
         return new BoxedString(cast(string)buf[0 .. indicator].idup);
@@ -226,8 +215,7 @@ class SqlCommand : DbCommand
     {
         if (_stmt is null) prepare();
 
-        auto ret = SQLExecute(_stmt);
-        checkError(cast(SQLSMALLINT)3, _stmt, ret, "SQLExecute");
+        enforceOk(execute(_stmt), "SQLExecute");
 
         return new SqlDataReader(this, _stmt);
     }
@@ -241,7 +229,7 @@ class SqlCommand : DbCommand
     {
         if (_stmt !is null)
         {
-            SQLFreeHandle(cast(SQLSMALLINT)3, _stmt);
+            freeHandle(SQL_HANDLE_STMT, _stmt);
             _stmt = null;
         }
     }

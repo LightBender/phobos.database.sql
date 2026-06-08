@@ -3,7 +3,8 @@ module phobos.database.sql.connection;
 import phobos.database.sql.utility;
 import phobos.database.sql.command;
 import phobos.database.sql.transaction;
-import etc.c.odbc.odbc64;
+import odbc;
+import etc.c.odbc;
 import std.string;
 import std.array;
 import std.exception;
@@ -83,31 +84,19 @@ class SqlConnection : DbConnection
     @property override string database()
     {
         enforceOpen();
-        SQLCHAR[256] dbName;
-        SQLSMALLINT len;
-        auto ret = SQLGetInfo(_dbc, 16, dbName.ptr, cast(SQLSMALLINT)256, &len);
-        checkError(cast(SQLSMALLINT)2, _dbc, ret, "SQLGetInfo DATABASE_NAME");
-        return cast(string)(dbName[0 .. len]).idup;
+        return unwrap(getInfoString(_dbc, SQL_DATABASE_NAME), "SQLGetInfo DATABASE_NAME");
     }
 
     @property override string dataSource()
     {
         enforceOpen();
-        SQLCHAR[256] dsName;
-        SQLSMALLINT len;
-        auto ret = SQLGetInfo(_dbc, 110, dsName.ptr, cast(SQLSMALLINT)256, &len);
-        checkError(cast(SQLSMALLINT)2, _dbc, ret, "SQLGetInfo DATA_SOURCE_NAME");
-        return cast(string)(dsName[0 .. len]).idup;
+        return unwrap(getInfoString(_dbc, SQL_DATA_SOURCE_NAME), "SQLGetInfo DATA_SOURCE_NAME");
     }
 
     @property override string serverVersion()
     {
         enforceOpen();
-        SQLCHAR[256] ver;
-        SQLSMALLINT len;
-        auto ret = SQLGetInfo(_dbc, 18, ver.ptr, cast(SQLSMALLINT)256, &len);
-        checkError(cast(SQLSMALLINT)2, _dbc, ret, "SQLGetInfo DBMS_VER");
-        return cast(string)(ver[0 .. len]).idup;
+        return unwrap(getInfoString(_dbc, SQL_DBMS_VER), "SQLGetInfo DBMS_VER");
     }
 
     @property override ConnectionState state() { return _state; }
@@ -125,24 +114,16 @@ class SqlConnection : DbConnection
         _state = ConnectionState.connecting;
 
         // Allocate environment
-        SQLHENV env;
-        auto ret1 = SQLAllocHandle(cast(SQLSMALLINT)1, cast(void*)0, &env);
-        checkError(cast(SQLSMALLINT)1, cast(void*)0, ret1, "SQLAllocHandle ENV");
-        _env = env;
+        _env = unwrap(allocEnv(), "SQLAllocHandle ENV");
 
         // Set ODBC version
-        auto ret2 = SQLSetEnvAttr(_env, 200, cast(SQLPOINTER)3, 0);
-        checkError(cast(SQLSMALLINT)1, _env, ret2, "SQLSetEnvAttr");
+        enforceOk(setEnvAttr(_env, SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC3), "SQLSetEnvAttr");
 
         // Allocate DBC
-        SQLHDBC dbc;
-        auto ret3 = SQLAllocHandle(cast(SQLSMALLINT)2, _env, &dbc);
-        checkError(cast(SQLSMALLINT)1, _env, ret3, "SQLAllocHandle DBC");
-        _dbc = dbc;
+        _dbc = unwrap(allocConnection(_env), "SQLAllocHandle DBC");
 
         // Driver connect
-        auto ret4 = SQLDriverConnect(_dbc, null, cast(SQLCHAR*)_connectionString.ptr, cast(SQLSMALLINT)-3, null, 0, null, 0);
-        checkError(cast(SQLSMALLINT)2, _dbc, ret4, "SQLDriverConnect");
+        unwrap(driverConnect(_dbc, _connectionString), "SQLDriverConnect");
 
         _state = ConnectionState.open;
     }
@@ -151,21 +132,14 @@ class SqlConnection : DbConnection
     {
         if (_dbc !is null)
         {
-            auto ret = SQLDisconnect(_dbc);
-            checkError(cast(SQLSMALLINT)2, _dbc, ret, "SQLDisconnect");
-        }
-
-        if (_dbc !is null)
-        {
-            auto ret = SQLFreeHandle(cast(SQLSMALLINT)2, _dbc);
-            checkError(cast(SQLSMALLINT)2, _dbc, ret, "SQLFreeHandle DBC");
+            enforceOk(disconnect(_dbc), "SQLDisconnect");
+            enforceOk(freeHandle(SQL_HANDLE_DBC, _dbc), "SQLFreeHandle DBC");
             _dbc = null;
         }
 
         if (_env !is null)
         {
-            auto ret = SQLFreeHandle(cast(SQLSMALLINT)1, _env);
-            checkError(cast(SQLSMALLINT)1, _env, ret, "SQLFreeHandle ENV");
+            enforceOk(freeHandle(SQL_HANDLE_ENV, _env), "SQLFreeHandle ENV");
             _env = null;
         }
 
@@ -219,7 +193,8 @@ unittest
 
     assert(conn.state == ConnectionState.open);
     assert(!conn.database.empty);
-    assert(!conn.dataSource.empty);
+    // dataSource (SQL_DATA_SOURCE_NAME) is the DSN, which is legitimately empty
+    // when connecting via a DRIVER= connection string without a DSN.
     assert(!conn.serverVersion.empty);
 
     conn.close();

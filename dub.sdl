@@ -4,4 +4,4 @@ authors "Adam Wilson"
 copyright "Copyright © 2026, Adam Wilson"
 license "BSL-1.0"
 
-lflags `-lodbc`
+dependency "odbc-d" version="~>4.0.0"
