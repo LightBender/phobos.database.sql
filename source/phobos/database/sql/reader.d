@@ -4,6 +4,7 @@ import phobos.database.sql.command;
 import phobos.database.sql.utility;
 import odbc;
 import etc.c.odbc;
+import phobos.sys.decimal;
 import std.datetime;
 import std.exception;
 import std.variant;
@@ -63,6 +64,11 @@ abstract class DbDataReader
     /// Returns the value of the specified column as a string.
     string getString(int ordinal) { return getValue!string(ordinal); }
 
+    /// Returns the value of the specified column as a Decimal128. Used for
+    /// SQL DECIMAL, NUMERIC, and MONEY columns, which are decoded without
+    /// floating-point rounding error.
+    Decimal128 getDecimal(int ordinal) { return getValue(ordinal).get!Decimal128; }
+
     /// Returns the value of the specified column as an array of bytes.
     byte[] getBytes(int ordinal) { return getValue(ordinal).get!(byte[]); }
 
@@ -85,12 +91,15 @@ class SqlDataReader : DbDataReader
     private SqlCommand _command;
     private SQLHSTMT _stmt;
     private bool _isClosed;
+    private Variant[] _rowValues;
+    private bool _hasRow;
 
     package this(SqlCommand command, SQLHSTMT stmt)
     {
         _command = command;
         _stmt = stmt;
         _isClosed = false;
+        _hasRow = false;
     }
 
     override bool read()
@@ -100,8 +109,16 @@ class SqlDataReader : DbDataReader
 
         auto res = fetch(_stmt);
         if (res.code == SQL_NO_DATA)
+        {
+            _hasRow = false;
+            _rowValues = null;
             return false;
+        }
         enforceOk(res, "SQLFetch");
+
+        // Cache every column of the current row so callers may read values
+        // repeatedly and in any order, unlike the forward-only ODBC cursor.
+        cacheCurrentRow();
         return true;
     }
 
@@ -109,6 +126,10 @@ class SqlDataReader : DbDataReader
     {
         if (_isClosed)
             throw new Exception("Invalid attempt to call nextResult when reader is closed.");
+
+        // Any cached row belongs to the previous result set.
+        _hasRow = false;
+        _rowValues = null;
 
         auto res = moreResults(_stmt);
         if (res.code == SQL_NO_DATA)
@@ -143,11 +164,36 @@ class SqlDataReader : DbDataReader
         throw new Exception("Column not found: " ~ name);
     }
 
-    override Variant getValue(int ordinal)
+    private void ensureRow()
     {
         if (_isClosed)
             throw new Exception("Invalid attempt to read when reader is closed.");
+        if (!_hasRow)
+            throw new Exception("Invalid attempt to read when no row is available. Call read() first.");
+    }
 
+    private void cacheCurrentRow()
+    {
+        SQLSMALLINT colCount = unwrap(numResultCols(_stmt), "SQLNumResultCols");
+        _rowValues = new Variant[colCount];
+        for (int i = 0; i < colCount; i++)
+            _rowValues[i] = readColumn(i);
+        _hasRow = true;
+    }
+
+    override Variant getValue(int ordinal)
+    {
+        ensureRow();
+        if (ordinal < 0 || ordinal >= _rowValues.length)
+            throw new Exception("Column ordinal out of range.");
+        return _rowValues[ordinal];
+    }
+
+    /// Reads a single column's value directly from the current row of the
+    /// statement. Each column may only be fetched once from the driver, so the
+    /// results are cached by `cacheCurrentRow` for repeated access.
+    private Variant readColumn(int ordinal)
+    {
         immutable col = cast(SQLUSMALLINT)(ordinal + 1);
 
         SQLSMALLINT dataType = unwrap(describeColumn(_stmt, col), "SQLDescribeCol").dataType;
@@ -195,6 +241,24 @@ class SqlDataReader : DbDataReader
                 if (res.value == SQL_NULL_DATA)
                     return Variant(null);
                 return Variant(lval);
+
+            case SQL_DECIMAL:
+            case SQL_NUMERIC:
+                // SQL DECIMAL, NUMERIC, and MONEY are fetched as a string and
+                // parsed into a BID-encoded Decimal128 so that no precision is
+                // lost to floating-point rounding. (SQL Server reports MONEY
+                // and SMALLMONEY as SQL_DECIMAL.)
+                SQLCHAR[128] decBuf;
+                res = getData(_stmt, col, SQL_C_CHAR, cast(void[])decBuf[]);
+                if (res.code == SQL_NO_DATA) return Variant(null);
+                enforceOk(res, "SQLGetData");
+                indPtr = res.value;
+                if (indPtr == SQL_NULL_DATA)
+                    return Variant(null);
+                if (indPtr <= 0)
+                    return Variant(Decimal128("0"));
+                immutable decLen = indPtr < decBuf.length ? indPtr : decBuf.length;
+                return Variant(Decimal128(cast(const(char)[])decBuf[0 .. decLen]));
 
             case SQL_BINARY:
             case SQL_VARBINARY:
@@ -313,29 +377,16 @@ class SqlDataReader : DbDataReader
 
     override Variant[] getValues()
     {
-        if (_isClosed)
-            throw new Exception("Invalid attempt to read when reader is closed.");
-
-        SQLSMALLINT colCount = unwrap(numResultCols(_stmt), "SQLNumResultCols");
-
-        Variant[] values = new Variant[colCount];
-        for (int i = 0; i < colCount; i++)
-        {
-            values[i] = getValue(i);
-        }
-        return values;
+        ensureRow();
+        return _rowValues.dup;
     }
 
     override bool isNull(int ordinal)
     {
-        if (_isClosed)
-            throw new Exception("Invalid attempt to read when reader is closed.");
-
-        SQLCHAR[1] dummy;
-        auto res = getData(_stmt, cast(SQLUSMALLINT)(ordinal + 1), SQL_C_CHAR,
-                (cast(void*)dummy.ptr)[0 .. 0]);
-        enforceOk(res, "SQLGetData null check");
-        return res.value == SQL_NULL_DATA;
+        ensureRow();
+        if (ordinal < 0 || ordinal >= _rowValues.length)
+            throw new Exception("Column ordinal out of range.");
+        return _rowValues[ordinal].type == typeid(typeof(null));
     }
 
     override void close()
@@ -346,6 +397,8 @@ class SqlDataReader : DbDataReader
             {
                 closeCursor(_stmt);
             }
+            _hasRow = false;
+            _rowValues = null;
             _isClosed = true;
         }
     }
@@ -467,6 +520,76 @@ unittest
     assert(reader.isNull(9) == true);
     
     assert(reader.read() == false); // No more rows
+
+    selectCmd.dispose();
+}
+
+unittest
+{
+    import std.process : environment;
+    import std.format : format;
+    import std.array : empty;
+    import phobos.database.sql.connection;
+    import phobos.database.sql.command;
+
+    string driver = environment.get("ODBC_DRIVER");
+    string server = environment.get("ODBC_SERVER");
+    string database = environment.get("ODBC_DATABASE");
+    string user = environment.get("ODBC_USER");
+    string password = environment.get("ODBC_PASSWORD");
+
+    if (driver.empty || server.empty || database.empty || user.empty || password.empty)
+        return; // Skip test if env vars not set
+
+    string connStr = format("DRIVER=%s;SERVER=%s;DATABASE=%s;UID=%s;PWD=%s;TrustServerCertificate=yes;", driver, server, database, user, password);
+
+    auto conn = new SqlConnection(connStr);
+    conn.open();
+    scope(exit) conn.close();
+
+    // Create table with DECIMAL, NUMERIC, and MONEY columns.
+    auto createCmd = new SqlCommand(conn, i"CREATE TABLE ##ttable_odbc_decimal_test (id INT, dec_val DECIMAL(18,4), num_val NUMERIC(28,10), money_val MONEY)");
+    createCmd.executeNonQuery();
+    createCmd.dispose();
+
+    scope(exit)
+    {
+        auto dropCmd = new SqlCommand(conn, i"DROP TABLE IF EXISTS ##ttable_odbc_decimal_test");
+        dropCmd.executeNonQuery();
+        dropCmd.dispose();
+    }
+
+    auto insert1 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_decimal_test (id, dec_val, num_val, money_val) VALUES (1, 12345.6789, 1234567890.1234567890, 1234.5600)");
+    insert1.executeNonQuery();
+    insert1.dispose();
+
+    auto insert2 = new SqlCommand(conn, i"INSERT INTO ##ttable_odbc_decimal_test (id, dec_val, num_val, money_val) VALUES (2, NULL, NULL, NULL)");
+    insert2.executeNonQuery();
+    insert2.dispose();
+
+    auto selectCmd = new SqlCommand(conn, i"SELECT id, dec_val, num_val, money_val FROM ##ttable_odbc_decimal_test ORDER BY id");
+    auto reader = selectCmd.executeDataReader();
+    scope(exit) reader.close();
+
+    assert(reader.read() == true);
+
+    // Decimal values are decoded without floating-point rounding error.
+    assert(reader.getDecimal(1) == Decimal128("12345.6789"));
+    assert(reader.getDecimal(2) == Decimal128("1234567890.1234567890"));
+    assert(reader.getDecimal(3) == Decimal128("1234.5600"));
+
+    // Values can be read repeatedly and in any order.
+    assert(reader.getDecimal(3) == Decimal128("1234.5600"));
+    assert(reader.getDecimal(1) == Decimal128("12345.6789"));
+
+    assert(reader.read() == true);
+
+    // Second row is all NULL.
+    assert(reader.isNull(1) == true);
+    assert(reader.isNull(2) == true);
+    assert(reader.isNull(3) == true);
+
+    assert(reader.read() == false);
 
     selectCmd.dispose();
 }

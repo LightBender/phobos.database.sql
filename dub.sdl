@@ -5,3 +5,4 @@ copyright "Copyright © 2026, Adam Wilson"
 license "BSL-1.0"
 
 dependency "odbc-d" version="~>4.0.0"
+dependency "phobos-sys-exttypes" version="~>1.0.0"
