@@ -1,0 +1,27 @@
+In the command.d file. Using the SqlCommand class from ADO.NET in .NET 10 as a guide for the API, and including an abstract base class (DbCommand), let's build a similar class for the D programming language using the Phobos style. However, one deviation from .NET is that we want to create a constructor that accepts a D interpolated expression syntax string, we want to turn the expressions into an ODBC prepared statement. To do this, we would want to use CTFE to expand the IES variadic into the appropriate ODBC parameter binding statements at compiled time. ODBC connection information is available in the SqlConnnection object in the connection.d file. Use the ODBC implementation in etc.c.odbc.odbc64. Finally we want to implement an executeNoQuery and executeScalar methods.
+
+Using the SqlDataReader class from ADO.NET in .NET 10 as a guide for the API, we want to create an abstract DbDataReader class and a concrete SqlDataReader in the file reader.d. For now we will just implement the Next, Read, and Close methods. ODBC connection information is available in the SqlConnnection object in the connection.d file. Use the ODBC implementation in etc.c.odbc.odbc64.
+
+Next we need to implement an executeDataReader function in #command.d that creates and returns the new SqlDataReader.
+
+Now we need to add GetName and GetOrdinal.
+
+Next we need to add a unittest for the SqlDataReader. The test should create a test table with multiple types of data, populate it with two or more rows, and then get a SqlDataReader that is used to run getName and getOrdinal.
+
+In #file:reader.d we need to add GetValue methods using SqlDataReader from ADO.NET in .NET 10 as an example, including the abstract base class. There should be three methods. GetValue returns a value as a single Variant containing the data for the specified column ordinal. GetValues returns an array of Variant for each value in the row. And finally a GetValue template method that attempts to convert the database value to specified template type. All three methods should be tested in the existing unittest.
+
+Next we need to add the type specific Get methods from ADO.NET. We will use the D integer type names, like so: getByte, getShort, getInt, getLong. We will also add getFloat, getDouble, getChar, getChars, and getString.
+
+Excellent work so far, next let's add support for the Boolean type. We'll need to update the getValue method to support boolean SQL types and add a getBool method. After that we will need to update the unittest to include a test for Boolean values.
+
+Currently string data is limited to a pre-defined buffer length of 1024 characters, most SQL systems support strings up to 2^31-1 characters. Please correct the code to check the length of string data and allocate a buffer for the required length.
+
+Next we need to add support for byte arrays, this is similar to the string problem we just solved, except we need to add a method called getBytes.
+
+/plan I have added a new package called 'odbc-d' to the dub.sdl file, this project contains ODBC bindings in the etc.c.odbc package that replace the bindings provided by the DMD compiler using a better conversion process that would provide better implementations of the SQL* types used in this codebase that had to be manually created. In addition to those bindings, a new thin-wrapper API has been created in the api module. This wrapper API uses in D native types instead of C types and returns a Result template struct that contains the result of the operation, if any, as well as error data that can then be packaged up in an exception and thrown. What we want to do is a plan for cleaning up the manually declared types, replacing the C-level API calls with the D-native API's, and convert the returned Result structs into exceptions and throwing them. Note that the etc.c.odbc in the package may conflict with the existing package, please update the dub.sdl file if necessary.
+
+Currently the behavior of the read method is consistent with ODBC in that each column can be read once in sequence. The behavior of ASP.NET is that columns can be read many times in any order. Let's change the read method to not just advance to the next record. But to read and cache the values so that they can be read multiple times in any sequence.
+
+I have added a new package to dub.sdl called "phobos.sys.exttypes". This package contains simple data types that are not built into the language, of particular interest to us is the Decimal type, which uses the Intel BID encoding for decimal numbers to avoid floating pointing rounding errors. Lets use this type to add reader support for SQL Decimal/Numeric/Money types.
+
+Please generate the appropriate markdown readme for this project and place the text into the README.md file. Include a brief description of the project and the standard information typically included in a README for an open source project, information on how to add this project via DUB, a few examples of how to use the database API, and contribution guidelines that include a note saying that any LLM based contributions must include the Prompt used to generate the contribution in the PROMPTS.txt file.
